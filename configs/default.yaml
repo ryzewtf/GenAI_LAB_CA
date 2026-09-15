@@ -1,0 +1,57 @@
+# Default configuration for MiniCPM + frozen ViT gated cross-attention VQA.
+# Kaggle convention: the PlantVillageVQA dataset is added as a Notebook input and
+# mounts (unzipped) under data_root. Locally, point data_root at the extracted zip.
+
+data:
+  # On Kaggle: /kaggle/input/<your-dataset-slug>/PlantVillageVQA
+  # Locally:   data/raw/PlantVillageVQA
+  data_root: data/raw/PlantVillageVQA
+  csv_name: PlantVillageVQA.csv
+  images_dirname: Images
+  subset_size: 30000        # QA pairs after stratified sampling; large value => full set
+  max_images: 15000         # cap unique images (keeps feature cache < ~4GB)
+  val_frac: 0.10            # carved out of the 'train' split, BY IMAGE
+  test_frac: 0.10           # carved out of the 'train' split, BY IMAGE (native 'test' also kept)
+  seed: 42
+  prepared_dir: data/prepared   # where prepare.py writes train/val/test manifests
+
+model:
+  llm_name: openbmb/MiniCPM5-1B
+  vision_name: google/siglip-base-patch16-224
+  llm_hidden: 1536
+  vision_hidden: 768
+  vision_tokens: 196
+  insertion_layers: [7, 10, 13, 16, 19]
+  xattn_heads: 16
+  use_resampler: false      # Perceiver resampler 196 -> resampler_tokens
+  resampler_tokens: 64
+  eos_id: 1                 # answer terminator (config offers 1 or 130073)
+  pad_id: 1
+
+tokenizer:
+  max_question_tokens: 48
+  max_answer_tokens: 32
+
+cache:
+  feature_dir: data/cache/siglip_features   # one .pt per image_id, [196,768] fp16
+  batch_size: 64                             # ViT forward batch for caching
+
+train:
+  micro_batch: 2
+  grad_accum: 16            # effective batch = micro_batch * grad_accum
+  epochs: 4
+  lr: 1.0e-4
+  weight_decay: 0.01
+  warmup_frac: 0.03
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  num_workers: 2
+  log_every: 20
+  eval_every_frac: 0.5      # eval this often within an epoch (fraction of an epoch)
+  out_dir: runs/exp1
+  seed: 42
+
+eval:
+  max_new_tokens: 32
+  num_beams: 1              # 1 = greedy
+  blind: false             # force gates to 0 (blind-LLM baseline)
