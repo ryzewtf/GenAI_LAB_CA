@@ -55,6 +55,9 @@ def main():
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--grad-accum", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--resume", nargs="?", const="auto", default=None,
+                    help="resume from a full checkpoint; bare --resume uses "
+                         "<out_dir>/last.pt if present")
     args = ap.parse_args()
     cfg = load_config(args.config)
     tcfg = cfg["train"]
@@ -104,9 +107,30 @@ def main():
 
     best_em = -1.0
     gstep = 0
+    start_epoch = 0
     eval_every = max(1, int(steps_per_epoch * cfg["train"]["eval_every_frac"]))
 
-    for epoch in range(tcfg["epochs"]):
+    # --- optional resume from a full training-state checkpoint ---
+    resume_path = args.resume
+    if resume_path == "auto":
+        cand = os.path.join(tcfg["out_dir"], "last.pt")
+        resume_path = cand if os.path.isfile(cand) else None
+    if resume_path:
+        ck = torch.load(resume_path, map_location=device)
+        model.load_trainable_state_dict(ck["trainable"])
+        if "optimizer" in ck:
+            opt.load_state_dict(ck["optimizer"])
+            scaler.load_state_dict(ck["scaler"])
+            sched.load_state_dict(ck["scheduler"])
+            gstep = ck.get("step", 0)
+            best_em = ck.get("best_em", -1.0)
+            start_epoch = ck.get("epoch", 0)
+            print(f"[resume] {resume_path}: epoch {start_epoch} gstep {gstep} "
+                  f"best_em {best_em:.4f}")
+        else:
+            print(f"[resume] {resume_path}: weights only (no optimizer state)")
+
+    for epoch in range(start_epoch, tcfg["epochs"]):
         model.train()
         opt.zero_grad(set_to_none=True)
         running = 0.0
@@ -147,11 +171,13 @@ def main():
 
                 if gstep % eval_every == 0:
                     em = run_eval_and_save(model, val_loader, cfg, device,
-                                           gstep, logf, best_em)
+                                           gstep, logf, best_em,
+                                           opt, scaler, sched, epoch)
                     best_em = max(best_em, em)
                     model.train()
 
-        em = run_eval_and_save(model, val_loader, cfg, device, gstep, logf, best_em)
+        em = run_eval_and_save(model, val_loader, cfg, device, gstep, logf,
+                               best_em, opt, scaler, sched, epoch)
         best_em = max(best_em, em)
         model.train()
 
@@ -159,7 +185,8 @@ def main():
     print(f"[train] done. best val EM={best_em:.4f}")
 
 
-def run_eval_and_save(model, loader, cfg, device, gstep, logf, best_em):
+def run_eval_and_save(model, loader, cfg, device, gstep, logf, best_em,
+                      opt=None, scaler=None, sched=None, epoch=0):
     metrics = evaluate(model, loader, cfg, device, max_batches=None)
     gates = model.gate_report()
     rec = {"step": gstep, "eval": metrics,
@@ -169,9 +196,15 @@ def run_eval_and_save(model, loader, cfg, device, gstep, logf, best_em):
           f"F1={metrics['token_f1']:.4f} gates={rec['gates']}")
 
     ckpt_dir = cfg["train"]["out_dir"]
-    torch.save({"trainable": model.trainable_state_dict(),
-                "cfg": cfg, "step": gstep, "metrics": metrics},
-               os.path.join(ckpt_dir, "last.pt"))
+    # last.pt is a full training-state checkpoint so a timed-out run can resume
+    last = {"trainable": model.trainable_state_dict(),
+            "cfg": cfg, "step": gstep, "metrics": metrics,
+            "epoch": epoch, "best_em": max(best_em, metrics["exact_match"])}
+    if opt is not None:
+        last["optimizer"] = opt.state_dict()
+        last["scaler"] = scaler.state_dict()
+        last["scheduler"] = sched.state_dict()
+    torch.save(last, os.path.join(ckpt_dir, "last.pt"))
     if metrics["exact_match"] > best_em:
         torch.save({"trainable": model.trainable_state_dict(),
                     "cfg": cfg, "step": gstep, "metrics": metrics},
