@@ -1,0 +1,61 @@
+# Local evaluation of the Kaggle-trained checkpoint (Option A).
+# Reproduces the Kaggle eval exactly: same prepared splits (output/prepared),
+# same frozen backbones (output/models), features recomputed locally from the
+# raw images. Run on the local single GPU (RTX 5060 Ti, 16 GB).
+#
+#   python -m data.cache_features --config configs/local_eval.yaml
+#   python eval.py --config configs/local_eval.yaml --ckpt output/runs/exp1/best.pt --split test
+#   python eval.py --config configs/local_eval.yaml --ckpt output/runs/exp1/best.pt --split test --blind
+
+data:
+  data_root: data/raw/PlantVillageVQA   # local raw images live here
+  csv_name: PlantVillageVQA.csv
+  images_dirname: Images
+  subset_size: 30000
+  max_images: 15000
+  val_frac: 0.10
+  test_frac: 0.10
+  seed: 42
+  prepared_dir: output/prepared         # the Kaggle-generated splits (the model's real eval set)
+
+model:
+  llm_name: output/models/MiniCPM5-1B   # local snapshot from the Kaggle run
+  vision_name: output/models/siglip     # local SigLIP snapshot
+  llm_hidden: 1536
+  vision_hidden: 768
+  vision_tokens: 196
+  insertion_layers: [7, 10, 13, 16, 19]
+  xattn_heads: 16
+  use_resampler: false
+  resampler_tokens: 64
+  eos_id: 1
+  pad_id: 1
+
+tokenizer:
+  max_question_tokens: 48
+  max_answer_tokens: 32
+
+cache:
+  feature_dir: data/cache/kaggle_eval_features   # separate from the local-subset cache
+  batch_size: 64
+
+train:
+  micro_batch: 2
+  grad_accum: 16
+  epochs: 4
+  lr: 1.0e-4
+  weight_decay: 0.01
+  warmup_frac: 0.03
+  grad_clip: 1.0
+  gradient_checkpointing: true
+  num_workers: 0            # Windows/py3.14 spawn can't pickle the collate closure; features are on disk anyway
+  log_every: 20
+  eval_every_frac: 0.5
+  out_dir: output/runs/exp1
+  seed: 42
+
+eval:
+  max_new_tokens: 32
+  num_beams: 1
+  blind: false
+  batch_size: 32           # RTX 5060 Ti (16 GB) has headroom; bump to 64 if you like

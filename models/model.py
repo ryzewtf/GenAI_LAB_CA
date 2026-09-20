@@ -26,6 +26,15 @@ class LayerWithXAttn(nn.Module):
         self.xattn = xattn
         self.resampler = resampler
         self._owner = [owner]  # list to avoid registering owner as a submodule
+        # Cache of the projected image features (resampler+projector output).
+        # These are constant across the decode steps of one generation, so we
+        # compute them once per image batch instead of every token step.
+        self._proj_cache = None
+        self._proj_token = -1
+
+    def clear_proj_cache(self):
+        self._proj_cache = None
+        self._proj_token = -1
 
     def forward(self, hidden_states, *args, **kwargs):
         out = self.orig_layer(hidden_states, *args, **kwargs)
@@ -40,10 +49,20 @@ class LayerWithXAttn(nn.Module):
         owner = self._owner[0]
         img = getattr(owner, "_img_features", None)
         if img is not None and not getattr(owner, "_blind", False):
-            feats = img
-            if self.resampler is not None:
-                feats = self.resampler(feats)
-            feats = self.projector(feats.to(hidden.dtype))
+            token = getattr(owner, "_img_token", 0)
+            # Reuse the projected features if they were computed for this same
+            # image batch (same generation) and the batch dim still matches.
+            if (self._proj_cache is not None and self._proj_token == token
+                    and self._proj_cache.shape[0] == hidden.shape[0]
+                    and self._proj_cache.dtype == hidden.dtype):
+                feats = self._proj_cache
+            else:
+                feats = img
+                if self.resampler is not None:
+                    feats = self.resampler(feats)
+                feats = self.projector(feats.to(hidden.dtype))
+                self._proj_cache = feats
+                self._proj_token = token
             hidden = self.xattn(hidden, feats)
 
         if rest is not None:
@@ -89,22 +108,32 @@ class VQAModel(nn.Module):
         self.xattns = nn.ModuleList()
         self._img_features = None
         self._blind = False
+        self._img_token = 0          # bumped whenever the image batch changes
+        self._wrapped_layers = []    # LayerWithXAttn refs, for cache invalidation
 
         for li in self.insertion_layers:
             proj = Projector(in_dim=Vh, out_dim=D)
             xa = GatedCrossAttn(embed_dim=D, num_heads=m["xattn_heads"])
             self.projectors.append(proj)
             self.xattns.append(xa)
-            layers[li] = LayerWithXAttn(
+            wrapped = LayerWithXAttn(
                 layers[li], proj, xa, owner=self, resampler=self.resampler)
+            layers[li] = wrapped
+            self._wrapped_layers.append(wrapped)
 
         self.trainable_parameters(verbose=True)
 
     def set_image_features(self, img):
+        # New image batch => invalidate every wrapped layer's projected cache.
         self._img_features = img
+        self._img_token += 1
+        for w in self._wrapped_layers:
+            w.clear_proj_cache()
 
     def clear_image_features(self):
         self._img_features = None
+        for w in self._wrapped_layers:
+            w.clear_proj_cache()
 
     def forward(self, input_ids, attention_mask, image_features, labels=None,
                 blind=False):

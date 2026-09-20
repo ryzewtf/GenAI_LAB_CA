@@ -55,3 +55,4 @@ eval:
   max_new_tokens: 32
   num_beams: 1              # 1 = greedy
   blind: false             # force gates to 0 (blind-LLM baseline)
+  batch_size: 64           # generation batch size (eval loads only the ~2.5GB LLM+adapters; ~12GB free on a T4)
