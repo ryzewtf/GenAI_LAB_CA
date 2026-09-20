@@ -25,6 +25,25 @@ def read_manifest(path):
     return items
 
 
+def resolve_path(it, images_root):
+    """Return a readable image path. Prefer the manifest's disk_path (e.g. a
+    Kaggle mount), else rebuild from the local images_root + image_id, retrying
+    the opposite extension case (.JPG/.jpg) since the corpus mixes both."""
+    dp = it.get("disk_path")
+    if dp and os.path.exists(dp):
+        return dp
+    image_id = str(it["image_id"])
+    cand = os.path.join(images_root, image_id)
+    if os.path.exists(cand):
+        return cand
+    stem, ext = os.path.splitext(image_id)
+    for alt in (ext.upper(), ext.lower(), ".JPG", ".jpg", ".png", ".PNG"):
+        c = os.path.join(images_root, stem + alt)
+        if os.path.exists(c):
+            return c
+    return dp or cand  # non-existent; caller's open() will report it
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/default.yaml")
@@ -35,6 +54,8 @@ def main():
     items = read_manifest(manifest)
     out_dir = cfg["cache"]["feature_dir"]
     os.makedirs(out_dir, exist_ok=True)
+    images_root = os.path.join(cfg["data"]["data_root"],
+                               cfg["data"]["images_dirname"])
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     enc = VisionEncoder(cfg["model"]["vision_name"], device=device,
@@ -49,7 +70,7 @@ def main():
     done = 0
     for it in todo:
         try:
-            img = Image.open(it["disk_path"]).convert("RGB")
+            img = Image.open(resolve_path(it, images_root)).convert("RGB")
         except Exception as e:
             print(f"[cache] skip {it['image_id']}: {e}")
             continue
